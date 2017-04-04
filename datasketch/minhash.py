@@ -40,6 +40,14 @@ class MinHash(object):
         MinHash serialized before version 1.1.1 cannot be deserialized properly 
         in newer versions (`need to migrate? <https://github.com/ekzhu/datasketch/issues/18>`_). 
 
+    Note:
+        Since version 1.1.3, MinHash uses Numpy's random number generator 
+        instead of Python's built-in random package. This change makes the 
+        hash values consistent across different Python versions.
+        The side-effect is that now MinHash created before version 1.1.3 won't
+        work (i.e., ``jaccard``, ``merge`` and ``union``)
+        with those created after. 
+
     .. _`Jaccard similarity`: https://en.wikipedia.org/wiki/Jaccard_index
     .. _hashlib: https://docs.python.org/3.5/library/hashlib.html
     .. _`pickle`: https://docs.python.org/3/library/pickle.html
@@ -65,13 +73,12 @@ class MinHash(object):
         if permutations is not None:
             self.permutations = permutations
         else:
-            generator = random.Random()
-            generator.seed(self.seed)
+            generator = np.random.RandomState(self.seed)
             # Create parameters for a random bijective permutation function
             # that maps a 32-bit hash value to another 32-bit hash value.
             # http://en.wikipedia.org/wiki/Universal_hashing
-            self.permutations = np.array([(generator.randint(1, _mersenne_prime),
-                                           generator.randint(0, _mersenne_prime))
+            self.permutations = np.array([(generator.randint(1, _mersenne_prime, dtype=np.uint64),
+                                           generator.randint(0, _mersenne_prime, dtype=np.uint64))
                                           for _ in range(num_perm)], dtype=np.uint64).T
         if len(self) != len(self.permutations[0]):
             raise ValueError("Numbers of hash values and permutations mismatch")

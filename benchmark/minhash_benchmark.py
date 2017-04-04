@@ -1,7 +1,8 @@
 '''
 Benchmarking the performance and accuracy of MinHash.
 '''
-import time, logging, random
+import time, logging
+from numpy import random
 from hashlib import sha1
 import matplotlib
 matplotlib.use('Agg')
@@ -69,5 +70,6 @@ ax.set_ylabel("Absolute error in Jaccard estimation")
 ax.set_title("MinHash accuracy")
 ax.grid()
 
+plt.tight_layout()
 fig.savefig(output)
 logging.info("Plot saved to %s" % output)
