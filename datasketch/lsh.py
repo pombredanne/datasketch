@@ -21,7 +21,7 @@ except ImportError:
 
 def _false_positive_probability(threshold, b, r):
     _probability = lambda s : 1 - (1 - s**float(r))**float(b)
-    a, err = integrate(_probability, 0.0, threshold) 
+    a, err = integrate(_probability, 0.0, threshold)
     return a
 
 
@@ -53,9 +53,9 @@ def _optimal_param(threshold, num_perm, false_positive_weight,
 
 class MinHashLSH(object):
     '''
-    The :ref:`minhash_lsh` index. 
+    The :ref:`minhash_lsh` index.
     It supports query with `Jaccard similarity`_ threshold.
-    Reference: `Chapter 3, Mining of Massive Datasets 
+    Reference: `Chapter 3, Mining of Massive Datasets
     <http://www.mmds.org/>`_.
 
     Args:
@@ -65,33 +65,38 @@ class MinHashLSH(object):
         num_perm (int, optional): The number of permutation functions used
             by the MinHash to be indexed. For weighted MinHash, this
             is the sample size (`sample_size`).
-        weights (tuple, optional): Used to adjust the relative importance of 
+        weights (tuple, optional): Used to adjust the relative importance of
             minimizing false positive and false negative when optimizing
             for the Jaccard similarity threshold.
-            `weights` is a tuple in the format of 
+            `weights` is a tuple in the format of
             :code:`(false_positive_weight, false_negative_weight)`.
         params (tuple, optional): The LSH parameters (i.e., number of bands and size
             of each bands). This is used to bypass the parameter optimization
-            step in the constructor. `threshold` and `weights` will be ignored 
+            step in the constructor. `threshold` and `weights` will be ignored
             if this is given.
         storage_config (dict, optional): Type of storage service to use for storing
             hashtables and keys.
+            `basename` is an optional property whose value will be used as the prefix to
+            stored keys. If this is not set, a random string will be generated instead. If you
+            set this, you will be responsible for ensuring there are no key collisions.
         prepickle (bool, optional): If True, all keys are pickled to bytes before
             insertion. If None, a default value is chosen based on the
             `storage_config`.
 
-    Note: 
-        `weights` must sum to 1.0, and the format is 
+    Note:
+        `weights` must sum to 1.0, and the format is
         (false positive weight, false negative weight).
         For example, if minimizing false negative (or maintaining high recall) is more
         important, assign more weight toward false negative: weights=(0.4, 0.6).
         Try to live with a small difference between weights (i.e. < 0.5).
     '''
 
-    def __init__(self, threshold=0.9, num_perm=128, weights=(0.5,0.5),
-                 params=None, storage_config={'type': 'dict'}, prepickle=None):
+    def __init__(self, threshold=0.9, num_perm=128, weights=(0.5, 0.5),
+                 params=None, storage_config=None, prepickle=None):
+        storage_config = {'type': 'dict'} if not storage_config else storage_config
+        self._buffer_size = 50000
         if threshold > 1.0 or threshold < 0.0:
-            raise ValueError("threshold must be in [0.0, 1.0]") 
+            raise ValueError("threshold must be in [0.0, 1.0]")
         if num_perm < 2:
             raise ValueError("Too few permutation functions")
         if any(w < 0.0 or w > 1.0 for w in weights):
@@ -107,63 +112,78 @@ class MinHashLSH(object):
             false_positive_weight, false_negative_weight = weights
             self.b, self.r = _optimal_param(threshold, num_perm,
                     false_positive_weight, false_negative_weight)
-        if prepickle is None:
-            self.prepickle = storage_config['type'] == 'redis'
-        else:
-            self.prepickle = prepickle
-        basename = _random_name(11)
+
+        self.prepickle = storage_config['type'] == 'redis' if prepickle is None else prepickle
+
+        basename = storage_config.get('basename', _random_name(11))
         self.hashtables = [
-            unordered_storage(storage_config, name=basename + b'_bucket_' + bytes([i]))
+            unordered_storage(storage_config, name=b''.join([basename, b'_bucket_', bytes([i])]))
             for i in range(self.b)]
         self.hashranges = [(i*self.r, (i+1)*self.r) for i in range(self.b)]
-        self.keys = ordered_storage(storage_config, name=basename + b'_keys')
+        self.keys = ordered_storage(storage_config, name=b''.join([basename, b'_keys']))
 
-    def insert(self, key, minhash):
+    @property
+    def buffer_size(self):
+        return self._buffer_size
+
+    @buffer_size.setter
+    def buffer_size(self, value):
+        self.keys.buffer_size = value
+        for t in self.hashtables:
+            t.buffer_size = value
+        self._buffer_size = value
+
+    def insert(self, key, minhash, check_duplication=True):
         '''
-        Insert a unique key to the index, together
-        with a MinHash (or weighted MinHash) of the set referenced by 
+        Insert a key to the index, together
+        with a MinHash (or weighted MinHash) of the set referenced by
         the key.
 
-        Args:
-            key (hashable): The unique identifier of the set. 
-            minhash (datasketch.MinHash): The MinHash of the set. 
+        :param str key: The identifier of the set.
+        :param datasketch.MinHash minhash: The MinHash of the set.
+        :param bool check_duplication: To avoid duplicate keys in the storage (`default=True`).
+                                       It's recommended to not change the default, but
+                                       if you want to avoid the overhead during insert
+                                       you can set `check_duplication = False`.
         '''
-        self._insert(key, minhash, check_duplication=True, buffer=False)
+        self._insert(key, minhash, check_duplication=check_duplication, buffer=False)
 
-    def insertion_session(self):
+    def insertion_session(self, buffer_size=50000):
         '''
         Create a context manager for fast insertion into this index.
+
+        :param int buffer_size: The buffer size for insert_session mode (default=50000).
 
         Returns:
             datasketch.lsh.MinHashLSHInsertionSession
         '''
-        return MinHashLSHInsertionSession(self)
+        return MinHashLSHInsertionSession(self, buffer_size=buffer_size)
 
     def _insert(self, key, minhash, check_duplication=True, buffer=False):
         if len(minhash) != self.h:
             raise ValueError("Expecting minhash with length %d, got %d"
                     % (self.h, len(minhash)))
+        if self.prepickle:
+            key = pickle.dumps(key)
         if check_duplication and key in self.keys:
             raise ValueError("The given key already exists")
         Hs = [self._H(minhash.hashvalues[start:end])
               for start, end in self.hashranges]
-        if self.prepickle:
-            key = pickle.dumps(key)
         self.keys.insert(key, *Hs, buffer=buffer)
         for H, hashtable in zip(Hs, self.hashtables):
             hashtable.insert(H, key, buffer=buffer)
 
     def query(self, minhash):
         '''
-        Giving the MinHash of the query set, retrieve 
+        Giving the MinHash of the query set, retrieve
         the keys that references sets with Jaccard
         similarities greater than the threshold.
-        
+
         Args:
-            minhash (datasketch.MinHash): The MinHash of the query set. 
+            minhash (datasketch.MinHash): The MinHash of the query set.
 
         Returns:
-            `list` of keys.
+            `list` of unique keys.
         '''
         if len(minhash) != self.h:
             raise ValueError("Expecting minhash with length %d, got %d"
@@ -183,7 +203,7 @@ class MinHashLSH(object):
         Args:
             key (hashable): The unique identifier of a set.
 
-        Returns: 
+        Returns:
             bool: True only if the key exists in the index.
         '''
         if self.prepickle:
@@ -247,7 +267,7 @@ class MinHashLSH(object):
 
     def get_subset_counts(self, *keys):
         '''
-        Returns the bucket allocation counts (see :ref:`get_counts` above)
+        Returns the bucket allocation counts (see :func:`~datasketch.MinHashLSH.get_counts` above)
         restricted to the list of keys given.
 
         Args:
@@ -271,13 +291,17 @@ class MinHashLSHInsertionSession:
     '''Context manager for batch insertion of documents into a MinHashLSH.
     '''
 
-    def __init__(self, lsh):
+    def __init__(self, lsh, buffer_size):
         self.lsh = lsh
+        self.lsh.buffer_size = buffer_size
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
         self.lsh.keys.empty_buffer()
         for hashtable in self.lsh.hashtables:
             hashtable.empty_buffer()

@@ -18,7 +18,7 @@ alternative is to use Locality Sensitive Hashing (LSH) index. LSH can be
 used with MinHash to achieve sub-linear query cost - that is a huge
 improvement. The details of the algorithm can be found in `Chapter 3,
 Mining of Massive
-Datasets <http://infolab.stanford.edu/~ullman/mmds/ch3.pdf>`__,
+Datasets <http://infolab.stanford.edu/~ullman/mmds/ch3.pdf>`__.
 
 This package includes the classic version of MinHash LSH. It is
 important to note that the query does not give you the exact result, due
@@ -105,10 +105,6 @@ The Redis storage option can be configured using:
             'redis': {'host': 'localhost', 'port': 6379}
          })
 
-Starting multiple MinHash LSH objects across different Python processes sharing 
-the same storage layer can be achieved through "pickling" of an initialized
-LSH object. You can also persist the index connection using `pickle`.
-
 To insert a large number of MinHashes in sequence, it is advisable to use
 an insertion session. This reduces the number of network calls during
 bulk insertion.
@@ -123,3 +119,192 @@ bulk insertion.
 
 Note that querying the LSH object during an open insertion session may result in
 inconsistency.
+
+Connecting to Existing MinHash LSH
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you are using an external storage layer (e.g., Redis) for your LSH, you can 
+share it across multiple processes. Ther are two ways to do it:
+
+The recommended way is to use "pickling". The MinHash LSH object is serializable
+so you can call `pickle`:
+
+.. code:: python
+
+    import pickle
+
+    # Create your LSH object
+    lsh = ...
+    # Serialize the LSH
+    data = pickle.dumps(lsh)
+    # Now you can pass it as an argument to a forked process or simply save it
+    # in an external storage.
+
+    # In a different process, deserialize the LSH
+    lsh = pickle.loads(data)
+
+Using pickle allows you to preserve everything you need to know about the LSH
+such as various parameter settings in a single location.
+
+Alternatively you can specify `basename` in the storage config when
+you first creating the LSH. For example:
+
+.. code:: python
+    
+    lsh = MinHashLSH(
+     threshold=0.5, num_perm=128, storage_config={
+        'type': 'redis',
+        'basename': b'unique_name_6ac4fg',
+        'redis': {'host': 'localhost', 'port': 6379}
+     })
+
+The `basename` will be used to generate key prefixes in the storage layer to
+uniquely identify data associated with this LSH. Thus, if you create a new
+LSH object with the same `basename`, you will be using the same underlying
+data in the storage layer associated with the old LSH.
+
+If you don't specify `basename`, MinHash LSH will generate a random string
+as the base name, and collision is extremely unlikely.
+
+.. _minhash_lsh_async:
+
+Asynchronous MinHash LSH at scale
+---------------------------------
+
+.. note::
+    The module supports Python version >=3.6, and is currently experimental. 
+    So the interface may change slightly in the future.
+
+This module may be useful if you want to process millions of text documents 
+in streaming/batch mode using asynchronous RESTful API (for example, aiohttp) for clustering tasks,
+and maximize the throughput of your service.
+
+We currently provide asynchronous MongoDB storage (*python motor package*)
+
+For sharing across different Python
+processes see :ref:`minhash_lsh_at_scale`.
+
+The Asynchronous MongoDB storage option can be configured using:
+
+* Usual way:
+
+.. code:: python
+
+        from datasketch.experimental.aio.lsh import AsyncMinHashLSH
+        from datasketch import MinHash
+
+        _storage = {'type': 'aiomongo', 'mongo': {'host': 'localhost', 'port': 27017, 'db': 'lsh_test'}}
+
+        async def func():
+            lsh = await AsyncMinHashLSH(storage_config=_storage, threshold=0.5, num_perm=16)
+            m1 = MinHash(16)
+            m1.update('a'.encode('utf8'))
+            m2 = MinHash(16)
+            m2.update('b'.encode('utf8'))
+            await lsh.insert('a', m1)
+            await lsh.insert('b', m2)
+            print(await lsh.query(m1))
+            print(await lsh.query(m2))
+            lsh.close()
+
+* Context Manager style:
+
+.. code:: python
+
+        from datasketch.experimental.aio.lsh import AsyncMinHashLSH
+        from datasketch import MinHash
+
+        _storage = {'type': 'aiomongo', 'mongo': {'host': 'localhost', 'port': 27017, 'db': 'lsh_test'}}
+
+        async def func():
+            async with AsyncMinHashLSH(storage_config=_storage, threshold=0.5, num_perm=16) as lsh:
+                m1 = MinHash(16)
+                m1.update('a'.encode('utf8'))
+                m2 = MinHash(16)
+                m2.update('b'.encode('utf8'))
+                await lsh.insert('a', m1)
+                await lsh.insert('b', m2)
+                print(await lsh.query(m1))
+                print(await lsh.query(m2))
+
+To configure Asynchronous MongoDB storage that will connect to a `replica set <http://api.mongodb.com/python/current/examples/high_availability.html#id1>`__ of three nodes, use:
+
+.. code:: python
+
+    _storage = {'type': 'aiomongo', 'mongo': {'replica_set': 'rs0', 'replica_set_nodes': 'node1:port1,node2:port2,node3:port3'}}
+
+If you want to pass additional params to the `Mongo client <http://api.mongodb.com/python/current/api/pymongo/mongo_client.html>` constructor, just put them in the ``mongo.args`` object in the storage config (example usage to configure X509 authentication):
+
+.. code:: python
+
+    _storage = {
+        'type': 'aiomongo',
+        'mongo':
+            {
+                ...,
+                'args': {
+                    'ssl': True,
+                    'ssl_ca_certs': 'root-ca.pem',
+                    'ssl_pem_passphrase': 'password',
+                    'ssl_certfile': 'certfile.pem',
+                    'authMechanism': "MONGODB-X509",
+                    'username': "username"
+                }
+            }
+    }
+        
+To create index for a large number of MinHashes using asynchronous MinHash LSH.
+
+.. code:: python
+
+    from datasketch.experimental.aio.lsh import AsyncMinHashLSH
+    from datasketch import MinHash
+
+    def chunk(it, size):
+        it = iter(it)
+        return iter(lambda: tuple(islice(it, size)), ())
+
+    _chunked_str = chunk((random.choice(string.ascii_lowercase) for _ in range(10000)), 4)
+    seq = frozenset(chain((''.join(s) for s in _chunked_str), ('aahhb', 'aahh', 'aahhc', 'aac', 'kld', 'bhg', 'kkd', 'yow', 'ppi', 'eer')))
+    objs = [MinHash(16) for _ in range(len(seq))]
+    for e, obj in zip(seq, objs):
+        for i in e:
+            obj.update(i.encode('utf-8'))
+    data = [(e, m) for e, m in zip(seq, objs)]
+
+    _storage = {'type': 'aiomongo', 'mongo': {'host': 'localhost', 'port': 27017, 'db': 'lsh_test'}}
+    async def func():
+        async with AsyncMinHashLSH(storage_config=_storage, threshold=0.5, num_perm=16) as lsh:
+            async with lsh.insertion_session(batch_size=1000) as session:
+                fs = (session.insert(key, minhash, check_duplication=False) for key, minhash in data)
+            await asyncio.gather(*fs)
+
+To bulk remove keys from LSH index using asynchronous MinHash LSH.
+
+.. code:: python
+
+    from datasketch.experimental.aio.lsh import AsyncMinHashLSH
+    from datasketch import MinHash
+
+    def chunk(it, size):
+        it = iter(it)
+        return iter(lambda: tuple(islice(it, size)), ())
+
+    _chunked_str = chunk((random.choice(string.ascii_lowercase) for _ in range(10000)), 4)
+    seq = frozenset(chain((''.join(s) for s in _chunked_str), ('aahhb', 'aahh', 'aahhc', 'aac', 'kld', 'bhg', 'kkd', 'yow', 'ppi', 'eer')))
+    objs = [MinHash(16) for _ in range(len(seq))]
+    for e, obj in zip(seq, objs):
+        for i in e:
+            obj.update(i.encode('utf-8'))
+    data = [(e, m) for e, m in zip(seq, objs)]
+
+    _storage = {'type': 'aiomongo', 'mongo': {'host': 'localhost', 'port': 27017, 'db': 'lsh_test'}}
+    async def func():
+        async with AsyncMinHashLSH(storage_config=_storage, threshold=0.5, num_perm=16) as lsh:
+            async with lsh.insertion_session(batch_size=1000) as session:
+                fs = (session.insert(key, minhash, check_duplication=False) for key, minhash in data)
+            await asyncio.gather(*fs)
+
+            async with lsh.delete_session(batch_size=3) as session:
+                fs = (session.remove(key) for key in keys_to_remove)
+                await asyncio.gather(*fs)
